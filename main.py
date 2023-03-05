@@ -8,6 +8,7 @@ import serial.tools.list_ports
 import time
 
 robot = robotarmDH.MYROBOT()
+# print(robot)
 
 COM = "COM3"
 
@@ -15,58 +16,76 @@ print("Ready")
 
 
 def ik(pose):
-    sol = robot.ikine_LMS(pose)  # Inverse Kinematics
+    sol = robot.ikine_LMS(
+        pose)  # mask=[1, 1, 1, 0, 1, 1])  # For underactuated robot with 5Dof # Does not work with 5Dof with LMS
+
     if not sol.success:
         print("no IK solution found")
-        return None, 1 # Returns error (1)
+        return [], True
 
     print("IK solution found")
     pos = sol.q  # np.delete(sol.q, 0)
-    pos = np.degrees(pos) # Convert radians to degrees
-    # Real joints of Robot have different 0 positions this needs to be converted
+    pos = np.degrees(pos)
+    # print(pos.tolist())
+    pos[0] = 0  # -= 180
     pos[1] += 90
     pos[2] = (pos[2] - 90) * -1
     pos[3] += 90
     pos[4] += 180
-    pos = np.round(pos, 2)  # Rounds posion so no unecessary fractions are send
-    pos = pos.tolist()  # Convert np array to py list
+    pos = np.round(pos, 2)
+    pos = pos.tolist()
     print(pos)
 
-    return pos, 0  # Returns joint pos and no error (0)
+    return pos, False
+
+
+def baseik(x, z):
+    v1 = pygame.math.Vector2(abs(x), 0)
+    v2 = pygame.math.Vector2(x, z)
+    # vxy = v1 - v2
+    return v2.angle_to(v1), v2.length() - x  # - 0.1
 
 
 pygame.init()
-print(pygame.joystick.get_count())
+# print(pygame.joystick.get_count())
 joystick = pygame.joystick.Joystick(0)
 joystick.init()
-
-#pos = 0
+print("Controller connected")
+pos = 0
 arduino_found = False
 newData = False
 lastSend = []
 lastSpeed = 500
 send_checksum = None  # Global checksum
 received_checksum = None
-#x = 0
-#y = 0
-#pitch = 0
-#roll = 0
-#con = False
 check_val = True
 
-soll_pose = [0, 0, 0, 0, 0]  # (x,y,z, knick, dreh)
-curr_pose = [0, 0, 0, 0, 0]  # pose to fall back if ik is wrong
-rotation = 0
-home = False
+stepsperdeg = [4800 / 360, 14.925 * 4, 14.925 * 4, 12000 / 360, 12000 / 360]
+joint_limits = [360, 180, 180, 180, 360]
+soll_pose = [0.1, 0.2, 0, 0, 180]  # (x,y,z, knick, dreh)
+curr_pose = [1, 1, 1, 1, 1]  # pose to fall back if ik is wrong
+msg = [1, 1, 1, 1, 1, 1, 1]
 
+base_rotation = 0
+rotation_length = 0
+waitTimes = [time.time(), time.time(), time.time(), time.time()]
+releaseTime = time.time()
 
-if input() == "S":
+cmd = int(0)
+gripper = 0
+home = 0
+rotate_wrist = False
+match_speed = False
+start_pos = 0
+
+if input("Type S to start programm:") == "S":
 
     myports = [tuple(p) for p in list(serial.tools.list_ports.comports())]
-    while not arduino_found:  # Waits till arduino is found on specified COM port
+    while not arduino_found:
         myports = [tuple(p) for p in list(serial.tools.list_ports.comports())]
         print(myports)
-
+        # arduino_port = [port for port in myports if 'COM4' in port][0]
+        # print(arduino_port)
         for port in myports:
             if COM in port:
                 arduino_found = True
@@ -77,64 +96,122 @@ if input() == "S":
     print("Arduino found")
     arduino = serial.Serial(port=COM, baudrate=250000, timeout=0.1, write_timeout=0)
     time.sleep(2)
-    arduino.write('S'.encode('utf-8'))  # Starts microcontroller which will start homing automatically
+    arduino.write('S'.encode('utf-8'))
 
     while True:
+        change = False
         received_checksum = com.recieve(arduino)
 
-        if received_checksum is not None:  # There is a received checksum (Arduino Responded)
-            print(received_checksum)
+        if received_checksum:  # There is a received checksum (Arduino Responded)
             check_val = True  # Next command can be send
-        if received_checksum is not None and received_checksum != send_checksum:  # There is a received checksum BUT it is incorrect
-            print("Checksum not correct! Resending...")
-            send_checksum = com.send(lastSend, lastSpeed, arduino)
-            check_val = False
 
-        if joystick.get_button(0):  # If controller button is pressed sends robot to home position
-            home = True
+        if joystick.get_button(0) and time.time() >= waitTimes[0] + 1:  # A Button to activate/deactivate gripper
+            if gripper == 1:
+                gripper = 0
+            else:
+                gripper = 1
+            change = True
+            waitTimes[0] = time.time()
+            releaseTime = time.time()
 
-        if check_val:  # New pose will only be generated and send if arduino is ready to receive a new one
-            change = False
+        if gripper == 1 and time.time() >= releaseTime + 15:
+            gripper = 0
+            change = True
+
+        if joystick.get_button(3) and time.time() >= waitTimes[1] + 1:  # Y Button to activate/deactivate the automatic wrist roation
+            if rotate_wrist:
+                rotate_wrist = False
+            else:
+                rotate_wrist = True
+            waitTimes[1] = time.time()
+
+        if joystick.get_button(6) and time.time() >= waitTimes[2] + 1:  # Screenshot button to home
+            time.sleep(5)
+            pygame.event.get()
+            if joystick.get_button(6):
+                waitTimes[2] = time.time()
+                start_pos = 1
+                home = 1
+                change = True
+
+        if joystick.get_button(7) and time.time() >= waitTimes[3] + 1:  # Menu button to return start position
+            waitTimes[3] = time.time()
+            start_pos = 1
+            change = True
+
+        if check_val:  # checksum == send_checksum and check_val:
             button = pygame.event.get()
-            deadzone = 0.11
-            pose_impact = (0.0006, 0.0006, 0.5, 0.4, 0.4)  # How much an input changes the pose
-            min_change = 0.1  # Min Change in [mm] which has to be achieved by input else robot won't move (to not clog the com)
-            min_change *= 0.001  # convert to meters
-            pose_change = (joystick.get_axis(0), -joystick.get_axis(1), trigger(joystick, deadzone), joystick.get_axis(2), joystick.get_axis(3))
-            # Gets controller joystick position
+            deadzone = 0.12
+            pose_impact = (0.0007, 0.0006, 0.0007, 0.4, 0.4)  # How much a input changes the pose
+            pose_change = (joystick.get_axis(0), trigger(joystick), joystick.get_axis(1), joystick.get_axis(2), joystick.get_axis(3))
+
             for i in range(0, len(pose_change)):
                 round(pose_change[i], 6)
-                if not (deadzone > pose_change[i] > -deadzone):  # Joystick input is never 0 because of potentiometers so a deadzone is necessary
+                if not (deadzone > pose_change[i] > -deadzone):
                     soll_pose[i] += pose_impact[i] * pose_change[i]
                     change = True
                     print(f"Sollpose: {soll_pose}")
 
-            if not (deadzone > pose_change[2] > - deadzone):  # Rotation of the Base is directly set with angles and not over ik
-                rotation += pose_impact[2] * pose_change[2]
-            if change or home:
-                speed = int(2000 * abs(max(pose_change, key=abs, default=0.25)))  # Key=abs only runs for the function and does not change the value
-                #  max speed is 2000 steps/s * the biggest analog controller input (float 0-1)
-                if home:  # Home position of the robot
-                    speed = 1000
-                    soll_pose = [0, 0, 0, 0, 0]
-                    rotation = 0
-                    home = False
+            if change:
+                speed = int(2000 * abs(max(pose_change, key=abs, default=0.25)))
+                if start_pos == 1:
+                    soll_pose = [0.1, 0.2, 0, 0, 180]
+                    speed = 700
+                    match_speed = True
+                    start_pos = 0
 
-                pose = SE3(0.1 + soll_pose[0], 0, 0.2 + soll_pose[1]) * SE3.RPY([0, 90, 180], unit='deg', order='xyz') * SE3.Ry(soll_pose[3], 'deg') * SE3.Rz(soll_pose[4], 'deg')  # 0,90,180 offset for correct default orientation of the robot end
+                # Key=abs only runs for the function and does not change the value
+                base_rotation, rotation_length = baseik(soll_pose[0], soll_pose[2])
 
-                pos, err = ik(pose)  # Converts cartesian (pose) to joint values (pos)
-                if err == 0:
-                    rotation = round(rotation, 2)
-                    if rotation > 180:  # Prevents infinite turning of the robot
-                        rotation = 180
-                    elif rotation < -180:
-                        rotation = -180
-                    pos[0] = rotation  # Rotation which is not calculated over ik is now added to the pos which will be send
+                print(f"Sollpose[0]: {soll_pose[0]}")
+                pose = SE3(soll_pose[0] + rotation_length, 0, soll_pose[1]) * SE3.RPY([0, 90, 0], unit='deg', order='xyz') * SE3.Ry(
+                    soll_pose[3], 'deg') * SE3.Rz(soll_pose[4],
+                                                  'deg')  # 0,90,180 offset for correct default orientation of the robot end
+                pos, err = ik(pose)
+
+                if not err:
+                    pos[0] = base_rotation
+                    pos[4] = soll_pose[4]
+                    if rotate_wrist:
+                        print("rotating Wrist")
+                        pos[4] += base_rotation # if the base is turned the wrist is also turned so it orientation stays the same
+                    print(pos[0])
+                    if -178 > pos[0] or pos[0] > 178:  # Base has to be tested extra
+                        err = True
+                        print(f"Catched error for Base Rotation {pos[0]}")
+                    for i in range(1, len(pos)):
+                        if 0 > pos[i] or pos[i] > joint_limits[i]:
+                            err = True
+                            print(f"Catched error for {i}: {pos[i]}")
+
+                print(f"Error: {err}")
+                if not err:
+                    for i in range(len(pos)):
+                        pos[i] *= stepsperdeg[i]
+                    # match_speed = True
+                    cmd = int(0)
+                    cmd = cmd | (gripper << 0)
+                    cmd = cmd | (home << 1)
+                    cmd = cmd | (match_speed << 2)
+                    print(f"CMD: {cmd}")  # Sends extra commands packaged as single bits in the int
+
+                    msg = pos
+                    msg.append(speed)
+                    msg.append(cmd)
+                    for i in range(0, len(msg)):  # converts msg to ints
+                        round(msg[i], 0)
+                        msg[i] = int(msg[i])
+                    print(f"Sending: {msg}")
+                    msg = com.int2bytes(msg)
+                    print(f"Sending Bytes:{msg}")
+                    arduino.write(msg)
                     curr_pose = soll_pose
-                    lastSend = pos  # So pos and speed can be resend
-                    lastSpeed = speed
-                    send_checksum = com.send(pos, speed, arduino)  # Sending data to arduino 
                     check_val = False
-                else:  # if ik has found no solution
+                    match_speed = False
+                    home = 0
+                    start_pos = 0
+                else:
+                    print("no IK solution")
                     soll_pose = curr_pose
+                    print(curr_pose)
                     print(soll_pose)

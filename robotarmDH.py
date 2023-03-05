@@ -4,6 +4,8 @@ from math import pi
 import numpy as np
 from roboticstoolbox import DHRobot, RevoluteDH, PrismaticDH, RevoluteMDH, PrismaticMDH
 
+# DH-Parameters of my Robot used for inverse kinematics
+
 
 class MYROBOT(DHRobot):
 
